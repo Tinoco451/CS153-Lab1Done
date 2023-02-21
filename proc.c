@@ -270,7 +270,7 @@ exit(void)
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
-wait(void)
+wait(int *status)
 {
   struct proc *p;
   int havekids, pid;
@@ -286,6 +286,10 @@ wait(void)
       havekids = 1;
       if(p->state == ZOMBIE){
         // Found one.
+        if(status){
+          *status = p->exitstatus;
+        }
+        
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
@@ -530,5 +534,134 @@ procdump(void)
         cprintf(" %p", pc[i]);
     }
     cprintf("\n");
+  }
+}
+
+void
+hello(void){
+  cprintf("\n\n Hello from your kernel space! \n\n");
+}
+
+void 
+getparents(void)
+{
+  struct proc *curproc = myproc();
+  //cprintf("\nPID IS: ");
+  cprintf("current proc name ");
+  cprintf(curproc->name);
+  cprintf("\n");
+  while(curproc->pid!=1)
+  {
+    cprintf("parent name ");
+    cprintf(curproc->parent->name);
+    cprintf(", pid ");
+    cprintf("%d",curproc->parent->pid),"\n";
+    cprintf("\n");
+    curproc=curproc->parent;
+  }
+
+}
+
+
+void
+exitStat(int status)
+{
+  //cprintf("Exit status: %d\n", status);
+
+  struct proc *curproc = myproc();
+  struct proc *p;
+  int fd;
+
+  curproc->exitstatus = status;
+  
+  if(curproc == initproc)
+    panic("init exiting");
+
+   //Close all open files.
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = 0;
+
+  acquire(&ptable.lock);
+
+  // Parent might be sleeping in wait().
+  wakeup1(curproc->parent);
+  
+  // Pass abandoned children to init.
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->parent == curproc){
+      p->parent = initproc;
+      if(p->state == ZOMBIE)
+	wakeup1(initproc);
+    }
+  }
+
+  // Jump into the scheduler, never to return.
+  curproc->state = ZOMBIE;
+  curproc->exitstatus = status;
+  sched();
+  panic("zombie exit");
+}
+
+int
+waitpid(int pid, int* status, int options)
+{
+  struct proc *p, *curproc = myproc();
+  int found_process; //similar to havekids in wait()
+  acquire(&ptable.lock);
+  
+  //Loops continuously till the process with given pid is terminated
+  for(;;) {
+    found_process = 0;    
+    
+    //Scan through the process table looking for exited processes. Terminated
+    //processes will be in ZOMBIE state.
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      // If the process pid does not match the given pid, no need to continue
+      // with this process.
+      if(p->pid != pid) continue;
+
+      found_process = 1;
+      if(p->state == ZOMBIE) {
+	//Found the process with the given pid that has exited.
+	kfree(p->kstack);
+	p->kstack = 0;
+	freevm(p->pgdir);
+	p->pid = 0;
+	p->parent = 0;
+	p->name[0] = 0;
+	p->killed = 0;
+	p->state = UNUSED;
+	if(status) *status = p->exitstatus;
+	p->exitstatus = 0;
+	release(&ptable.lock);
+	return pid;
+      } else if(options == 1) { //if options is passed by the user.
+	
+	//the process with the given pid is still running, so we
+	//don't block the current process, just release the lock on
+	//ptable and return 0.
+	release(&ptable.lock);
+	return 0;
+      } 
+    }
+
+    // No point waiting if the the process with given pid does not exist
+    // or the current process is killed.
+    if(!found_process || curproc->killed) {
+      release(&ptable.lock);
+      return -1;
+    }
+
+    // Wait for the process with the given pid to exit.
+    sleep(curproc, &ptable.lock);
   }
 }
